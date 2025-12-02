@@ -337,6 +337,26 @@ async def analizar_asistencia(file: UploadFile = File(...)):
             df_never.to_excel(writer, index=False, sheet_name="Nunca marcaron")
             df_impos.to_excel(writer, index=False, sheet_name="Reg sospechosos")
             df_base.to_excel(writer, index=False, sheet_name="Base normalizada")
+            
+            # AUTO-AJUSTAR ANCHO DE COLUMNAS
+            for sheet_name in writer.sheets:
+                worksheet = writer.sheets[sheet_name]
+                for column in worksheet.columns:
+                    max_length = 0
+                    column_letter = column[0].column_letter
+                    
+                    for cell in column:
+                        try:
+                            if cell.value:
+                                cell_length = len(str(cell.value))
+                                if cell_length > max_length:
+                                    max_length = cell_length
+                        except:
+                            pass
+                    
+                    # Ajustar ancho con un poco de padding
+                    adjusted_width = min(max_length + 2, 50)  # Máximo 50 caracteres
+                    worksheet.column_dimensions[column_letter].width = adjusted_width
         
         output_io.seek(0)
         
