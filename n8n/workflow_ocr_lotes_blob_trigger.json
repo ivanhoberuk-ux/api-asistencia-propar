@@ -1,0 +1,410 @@
+{
+  "name": "Pericias OCR Lotes - Blob Trigger",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerOn": "blobCreated",
+        "containerName": "pericias",
+        "prefix": "in/"
+      },
+      "id": "1",
+      "name": "Trigger Blob Creado",
+      "type": "n8n-nodes-base.azureBlobStorageTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1220,
+        220
+      ],
+      "credentials": {
+        "azureStorage": {
+          "id": "__REEMPLAZAR__",
+          "name": "Azure Blob Storage"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "blob",
+        "operation": "download",
+        "containerName": "pericias",
+        "blobName": "={{$json.name || $json.blobName}}"
+      },
+      "id": "2",
+      "name": "Descargar PDF Blob",
+      "type": "n8n-nodes-base.azureBlobStorage",
+      "typeVersion": 1,
+      "position": [
+        -980,
+        220
+      ],
+      "credentials": {
+        "azureStorage": {
+          "id": "__REEMPLAZAR__",
+          "name": "Azure Blob Storage"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "keepOnlySet": false,
+        "values": {
+          "string": [
+            {
+              "name": "blobName",
+              "value": "={{$json.name || $json.blobName}}"
+            },
+            {
+              "name": "originalFileName",
+              "value": "={{($json.name || $json.blobName || '').split('/').pop()}}"
+            },
+            {
+              "name": "outputBlobName",
+              "value": "={{'out/' + (($json.name || $json.blobName || '').split('/').pop().replace(/\\.pdf$/i, '.xlsx'))}}"
+            },
+            {
+              "name": "diAnalyzeUrl",
+              "value": "={{$env.AZURE_DI_ENDPOINT.replace(/\/$/, '') + '/formrecognizer/documentModels/prebuilt-layout:analyze?api-version=2023-07-31'}}"
+            }
+          ]
+        }
+      },
+      "id": "3",
+      "name": "Preparar Metadatos",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -760,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$json.diAnalyzeUrl}}",
+        "sendBinaryData": true,
+        "binaryPropertyName": "data",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        },
+        "headerParametersUi": {
+          "parameter": [
+            {
+              "name": "Ocp-Apim-Subscription-Key",
+              "value": "={{$env.AZURE_DI_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/pdf"
+            }
+          ]
+        }
+      },
+      "id": "4",
+      "name": "DI - Iniciar Análisis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -520,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "keepOnlySet": false,
+        "values": {
+          "string": [
+            {
+              "name": "operationLocation",
+              "value": "={{$json.headers['operation-location'] || $json.headers['Operation-Location']}}"
+            },
+            {
+              "name": "status",
+              "value": "notStarted"
+            }
+          ]
+        }
+      },
+      "id": "5",
+      "name": "Guardar Operation-Location",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -280,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "unit": "seconds",
+        "amount": 2
+      },
+      "id": "6",
+      "name": "Esperar 2s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -60,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{$json.operationLocation}}",
+        "jsonParameters": true,
+        "headerParametersUi": {
+          "parameter": [
+            {
+              "name": "Ocp-Apim-Subscription-Key",
+              "value": "={{$env.AZURE_DI_KEY}}"
+            }
+          ]
+        }
+      },
+      "id": "7",
+      "name": "DI - Consultar Estado",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.status}}",
+              "operation": "equals",
+              "value2": "succeeded"
+            }
+          ]
+        }
+      },
+      "id": "8",
+      "name": "¿Análisis completado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        420,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const REQUIRED_COLUMNS = [\n  'Manzana',\n  'Lote',\n  'Norte (medida en metros)',\n  'Linda Norte (quién linda al norte)',\n  'Sur (medida en metros)',\n  'Linda Sur (quién linda al sur)',\n  'Este (medida en metros)',\n  'Linda Este (quién linda al este)',\n  'Oeste (medida en metros)',\n  'Linda Oeste (quién linda al oeste)',\n  'Superficie m2',\n  'Comentarios',\n];\n\nfunction normalizeText(txt = '') {\n  return txt\n    .normalize('NFD')\n    .replace(/[\\u0300-\\u036f]/g, '')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nfunction parseNumber(raw = '') {\n  if (!raw) return '';\n  const cleaned = raw.replace(/[^\\d,.-]/g, '').replace(/\\.(?=\\d{3}(\\D|$))/g, '');\n  if (!cleaned) return '';\n  if (cleaned.includes(',') && cleaned.includes('.')) return cleaned.replace(/\\./g, '').replace(',', '.');\n  if (cleaned.includes(',')) return cleaned.replace(',', '.');\n  return cleaned;\n}\n\nfunction toLineText(result) {\n  const pages = result?.analyzeResult?.pages || [];\n  return pages\n    .map((p) => (p.lines || []).map((l) => l.content || '').join('\\n'))\n    .join('\\n');\n}\n\nfunction splitByRegexKeepingTag(text, regex) {\n  const out = [];\n  const matches = [...text.matchAll(regex)];\n  if (!matches.length) return out;\n\n  for (let i = 0; i < matches.length; i++) {\n    const start = matches[i].index;\n    const end = i + 1 < matches.length ? matches[i + 1].index : text.length;\n    out.push(text.slice(start, end).trim());\n  }\n  return out;\n}\n\nfunction extractManzana(block) {\n  const m = block.match(/MANZANA\\s+([A-Z0-9IVXLCDM-]+)/i);\n  return m ? m[1].toUpperCase() : '';\n}\n\nfunction extractLote(block) {\n  const m = block.match(/LOTE\\s*([A-Z0-9-]+)/i);\n  return m ? m[1].toUpperCase() : '';\n}\n\nfunction extractSuperficie(block) {\n  const m = block.match(/SUPERFICIE\\s*[:\\-]?\\s*([0-9][0-9.,]*)\\s*(m2|m\\.2|m²|metros?\\s+cuadrados?)/i);\n  return m ? parseNumber(m[1]) : '';\n}\n\nfunction getOrientationData(block, orient) {\n  const txt = normalizeText(block);\n  const upper = txt.toUpperCase();\n\n  const mMeasure1 = upper.match(new RegExp(`(?:AL|DEL|SOBRE|CONTRAFRENTE\\s+AL|COSTADO\\s+AL)?\\\\s*${orient}[^\\\\n.]{0,120}?MIDE\\\\s*([0-9][0-9.,]*)\\\\s*(?:M|MTS|MTS\\\\.|METROS?)`, 'i'));\n  const mMeasure2 = upper.match(new RegExp(`MIDE\\\\s*([0-9][0-9.,]*)\\\\s*(?:M|MTS|MTS\\\\.|METROS?)[^\\\\n.]{0,120}?${orient}`, 'i'));\n  const measure = parseNumber((mMeasure1 && mMeasure1[1]) || (mMeasure2 && mMeasure2[1]) || '');\n\n  const l1 = txt.match(new RegExp(`${orient}[^\\\\n.]{0,180}?LINDA\\\\s+CON\\\\s+([^.;\\\\n]+)`, 'i'));\n  const l2 = txt.match(new RegExp(`LINDA\\\\s+CON\\\\s+([^.;\\\\n]+)[^\\\\n.]{0,120}?${orient}`, 'i'));\n  const lindero = (l1 && l1[1]) || (l2 && l2[1]) || '';\n\n  return {\n    measure,\n    lindero: lindero.trim(),\n  };\n}\n\nfunction ensureColumns(row) {\n  const ordered = {};\n  for (const col of REQUIRED_COLUMNS) {\n    ordered[col] = row[col] ?? '';\n  }\n  return ordered;\n}\n\nconst input = items[0].json;\nconst fullText = toLineText(input);\nconst normalizedFullText = normalizeText(fullText);\n\nconst manzanaBlocks = splitByRegexKeepingTag(normalizedFullText, /MANZANA\\s+[A-Z0-9IVXLCDM-]+/gi);\n\nconst rows = [];\nconst seen = new Set();\n\nif (!manzanaBlocks.length) {\n  const row = ensureColumns({\n    Comentarios: 'Manzana no detectada; no se pudo segmentar el documento en lotes',\n  });\n  rows.push(row);\n} else {\n  for (const manzanaBlock of manzanaBlocks) {\n    const manzana = extractManzana(manzanaBlock);\n    const loteBlocks = splitByRegexKeepingTag(manzanaBlock, /LOTE\\s*[A-Z0-9-]+/gi);\n\n    if (!loteBlocks.length) {\n      rows.push(ensureColumns({\n        Manzana: manzana,\n        Comentarios: 'No se detectaron lotes dentro de la manzana',\n      }));\n      continue;\n    }\n\n    for (const loteBlock of loteBlocks) {\n      const lote = extractLote(loteBlock);\n      const norte = getOrientationData(loteBlock, 'NORTE');\n      const sur = getOrientationData(loteBlock, 'SUR');\n      const este = getOrientationData(loteBlock, 'ESTE');\n      const oeste = getOrientationData(loteBlock, 'OESTE');\n      const superficie = extractSuperficie(loteBlock);\n\n      const comments = [];\n      if (!manzana) comments.push('Manzana no detectada');\n      if (!lote) comments.push('Lote no detectado');\n      if (!norte.measure) comments.push('Norte no especificado');\n      if (!norte.lindero) comments.push('Linda Norte no detectada');\n      if (!sur.measure) comments.push('Sur no especificado');\n      if (!sur.lindero) comments.push('Linda Sur no detectada');\n      if (!este.measure) comments.push('Este no especificado');\n      if (!este.lindero) comments.push('Linda Este no detectada');\n      if (!oeste.measure) comments.push('Oeste no especificado');\n      if (!oeste.lindero) comments.push('Linda Oeste no detectada');\n      if (!superficie) comments.push('Superficie no detectada');\n\n      const dedupeKey = `${manzana}::${lote}`;\n      if (manzana && lote && seen.has(dedupeKey)) continue;\n      if (manzana && lote) seen.add(dedupeKey);\n\n      rows.push(ensureColumns({\n        Manzana: manzana,\n        Lote: lote,\n        'Norte (medida en metros)': norte.measure,\n        'Linda Norte (quién linda al norte)': norte.lindero,\n        'Sur (medida en metros)': sur.measure,\n        'Linda Sur (quién linda al sur)': sur.lindero,\n        'Este (medida en metros)': este.measure,\n        'Linda Este (quién linda al este)': este.lindero,\n        'Oeste (medida en metros)': oeste.measure,\n        'Linda Oeste (quién linda al oeste)': oeste.lindero,\n        'Superficie m2': superficie,\n        Comentarios: comments.join('; '),\n      }));\n    }\n  }\n}\n\nreturn rows.map((r) => ({ json: r }));"
+      },
+      "id": "9",
+      "name": "Parsear Lotes (Code)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toFile",
+        "fileFormat": "xlsx",
+        "options": {
+          "sheetName": "Lotes"
+        }
+      },
+      "id": "10",
+      "name": "Generar XLSX Lotes",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 1,
+      "position": [
+        920,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "blob",
+        "operation": "upload",
+        "containerName": "pericias",
+        "blobName": "={{$item(0).$node['Preparar Metadatos'].json['outputBlobName']}}",
+        "binaryData": true,
+        "binaryPropertyName": "data"
+      },
+      "id": "11",
+      "name": "Subir XLSX a out/",
+      "type": "n8n-nodes-base.azureBlobStorage",
+      "typeVersion": 1,
+      "position": [
+        1160,
+        220
+      ],
+      "credentials": {
+        "azureStorage": {
+          "id": "__REEMPLAZAR__",
+          "name": "Azure Blob Storage"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "log",
+              "value": "={{`Procesado ${$item(0).$node['Preparar Metadatos'].json['originalFileName']} | lotes: ${$items('Parsear Lotes (Code)').length} | salida: ${$item(0).$node['Preparar Metadatos'].json['outputBlobName']}`}}"
+            }
+          ]
+        }
+      },
+      "id": "12",
+      "name": "Log Resultado",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1380,
+        220
+      ]
+    }
+  ],
+  "connections": {
+    "Trigger Blob Creado": {
+      "main": [
+        [
+          {
+            "node": "Descargar PDF Blob",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Descargar PDF Blob": {
+      "main": [
+        [
+          {
+            "node": "Preparar Metadatos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Metadatos": {
+      "main": [
+        [
+          {
+            "node": "DI - Iniciar Análisis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DI - Iniciar Análisis": {
+      "main": [
+        [
+          {
+            "node": "Guardar Operation-Location",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar Operation-Location": {
+      "main": [
+        [
+          {
+            "node": "Esperar 2s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Esperar 2s": {
+      "main": [
+        [
+          {
+            "node": "DI - Consultar Estado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DI - Consultar Estado": {
+      "main": [
+        [
+          {
+            "node": "¿Análisis completado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Análisis completado?": {
+      "main": [
+        [
+          {
+            "node": "Parsear Lotes (Code)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Esperar 2s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parsear Lotes (Code)": {
+      "main": [
+        [
+          {
+            "node": "Generar XLSX Lotes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generar XLSX Lotes": {
+      "main": [
+        [
+          {
+            "node": "Subir XLSX a out/",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Subir XLSX a out/": {
+      "main": [
+        [
+          {
+            "node": "Log Resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "versionId": "1"
+}
